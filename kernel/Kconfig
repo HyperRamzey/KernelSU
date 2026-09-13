@@ -30,3 +30,77 @@ config KSU_DEBUG
 	  Enable KernelSU debug mode.
 
 endmenu
+
+config KSU_SUSFS
+	bool "KernelSU SUSFS support (v2.2.0 backport)"
+	depends on KSU
+	default y
+	help
+		SUSFS: SU filesystem hiding (sus_path, sus_mount, sus_kstat,
+		spoof_uname, spoof_cmdline, open_redirect). Backported from
+		JackA1ltman 4.4 patch, adapted for exynos7885 4.4.302.
+
+config KSU_SUSFS_SUS_PATH
+	bool "sus_path: hide paths from apps"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_MOUNT
+	bool "sus_mount: hide mounts from apps"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+	bool "auto-add KSU default mounts as sus"
+	depends on KSU_SUSFS_SUS_MOUNT
+	default y
+
+config KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+	bool "auto-add bind mounts as sus"
+	depends on KSU_SUSFS_SUS_MOUNT
+	default y
+
+config KSU_SUSFS_SUS_KSTAT
+	bool "sus_kstat: fake file stats"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_KSTAT_STATICALLY
+	bool "sus_kstat with static fake values"
+	depends on KSU_SUSFS_SUS_KSTAT
+	default y
+
+config KSU_SUSFS_AUTO_ADD_SUS_KSTAT_STATICALLY
+	bool "auto-add static sus_kstat entries"
+	depends on KSU_SUSFS_SUS_KSTAT_STATICALLY
+	default y
+
+config KSU_SUSFS_SUS_MAP
+	bool "sus_map: custom mount map"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_UNAME
+	bool "spoof uname (hostname/release)"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_ENABLE_LOG
+	bool "susfs logging"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	bool "hide ksu/susfs symbols from kallsyms"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	bool "spoof /proc/cmdline and bootconfig"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_OPEN_REDIRECT
+	bool "open redirect support"
+	depends on KSU_SUSFS
+	default y

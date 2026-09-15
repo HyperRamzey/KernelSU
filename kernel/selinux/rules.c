@@ -105,6 +105,13 @@ static int apply_kernelsu_rules_fn(void *ptr)
     ksu_allow(db, "init", "adb_data_file", "file", ALL);
     ksu_allow(db, "init", "adb_data_file", "dir", ALL); // #1289
 
+    // ROM-27: direct ksu-domain exec path for init's `exec u:r:ksu:s0 -- ksud`
+    // (attribute-expansion-independent; the services-stage exec runs after the
+    // execveat hook has stopped, so it relies purely on these policy rules)
+    ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "file", ALL);
+    ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "dir", ALL);
+    ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "lnk_file", ALL);
+
     // copied from Magisk rules
     // suRights
     ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
@@ -660,6 +667,25 @@ static int handle_sepolicy_fn(void *data)
 
 out:
     *(int *)(ctx->ctx_success_cmd_count) = success_cmd_count;
+    /*
+     * ROM-27 fix: module sepolicy batches on the 4.4 flex-array-backed
+     * policydb can drop/corrupt earlier-injected ksu-domain rules
+     * (observed: init exec of ksud at the services stage denied EACCES
+     * at selinux_bprm_set_creds entrypoint ~1.2s after the module batch,
+     * despite allow-all applied at second_stage). Re-assert the base
+     * rules after every module batch - idempotent (avtab merges, ebitmap
+     * bit-sets), same policy_rwlock / stop_machine context as the batch.
+     */
+    if (ret == 0 || success_cmd_count > 0) {
+        pr_info("ROM27: re-applying base kernelsu rules after module batch (applied=%d)\n",
+                success_cmd_count);
+        apply_kernelsu_rules_fn(db);
+        /* Direct rules: no attribute-expansion dependency for init's ksud execs */
+        ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "file", ALL);
+        ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "dir", ALL);
+        ksu_allow(db, KERNEL_SU_DOMAIN, "adb_data_file", "lnk_file", ALL);
+        pr_info("ROM27: direct ksu->adb_data_file rules asserted\n");
+    }
     return ret;
 }
 

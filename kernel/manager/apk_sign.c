@@ -323,8 +323,28 @@ int get_pkg_from_apk_path(char *pkg, const char *path)
         return -1;
 
     const char *last_hyphen = strchr(second_last_slash, '-');
-    if (!last_hyphen || last_hyphen > last_slash)
-        return -1;
+    if (!last_hyphen || last_hyphen > last_slash) {
+        // Not a /data/app payload path. PackageManager names those
+        // "<pkg>-<random>/base.apk", and the code below strips the suffix. A
+        // preinstalled app has neither, so its APK file is required to be named
+        // after the package (/system/app/<anything>/<pkg>.apk). That is what
+        // lets a system-shipped manager be crowned after a /data wipe: the
+        // kernel only ever sees paths, and packages.list is keyed by package.
+        const char *base = last_slash + 1;
+        int base_len = len - (int)(base - path);
+
+        if (base_len <= 4 || strncmp(base + base_len - 4, ".apk", 4))
+            return -1;
+
+        base_len -= 4;
+        if (base_len >= KSU_MAX_PACKAGE_NAME || base_len <= 0)
+            return -1;
+
+        strncpy(pkg, base, base_len);
+        pkg[base_len] = '\0';
+
+        return 0;
+    }
 
     int pkg_len = last_hyphen - second_last_slash - 1;
     if (pkg_len >= KSU_MAX_PACKAGE_NAME || pkg_len <= 0)

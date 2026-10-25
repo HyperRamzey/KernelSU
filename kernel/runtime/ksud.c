@@ -46,6 +46,17 @@ void on_post_fs_data(void)
     ksu_load_allow_list();
     ksu_observer_init();
 
+    // Crown the manager now, from the packages.list this /data already has,
+    // instead of waiting for the observer. The observer only reports creation
+    // and rename, so it fires on the first boot after a format (the file is
+    // created) but not necessarily on later ones, where system_server may
+    // rewrite the existing file in place. Without this the manager would stay
+    // uncrowned on a normal reboot: no ksu fd, no readable kernel version, and
+    // the app reports "unsupported" until it is reinstalled as a data app.
+    // Harmless when the file is absent (fresh format): the uid list is empty,
+    // nothing matches, and the observer covers it later in the same boot.
+    track_throne(false);
+
     // sanity check, this may influence the performance
     stop_input_hook();
 }

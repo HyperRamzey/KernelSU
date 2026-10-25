@@ -51,6 +51,12 @@ struct my_dir_context {
     void *private_data;
     int depth;
     int *stop;
+    // Set when walking a read-only system app tree instead of /data/app.
+    // The two layouts differ: PackageManager names every payload base.apk, while
+    // a preinstalled app keeps its own name (`<pkg>.apk`). The /data/app
+    // assumptions (base.apk only, path prefix, single filesystem) do not hold
+    // there, so they are keyed off this flag.
+    bool system_root;
 };
 
 // https://docs.kernel.org/filesystems/porting.html
@@ -111,14 +117,22 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name, int name
     }
 
     // now put this on candidate_path
-    if (d_type == DT_REG && !strncmp(name, "base.apk", 8)) {
-        snprintf(candidate_path, DATA_PATH_LEN, "%s/%.*s", my_ctx->parent_dir, namelen, name);
+    if (d_type == DT_REG) {
+        if (!strncmp(name, "base.apk", 8) ||
+            (my_ctx->system_root && namelen > 4 && !strncmp(name + namelen - 4, ".apk", 4))) {
+            snprintf(candidate_path, DATA_PATH_LEN, "%s/%.*s", my_ctx->parent_dir, namelen, name);
+        }
     }
 
     return FILLDIR_ACTOR_CONTINUE;
 }
 
 void search_manager(const char *path, int depth, struct list_head *uid_data)
+{
+    search_manager_in(path, depth, false, uid_data);
+}
+
+void search_manager_in(const char *path, int depth, bool system_root, struct list_head *uid_data)
 {
     int i, stop = 0;
     struct list_head data_path_list;
@@ -146,7 +160,8 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
                                           .parent_dir = pos->dirpath,
                                           .private_data = candidate_path,
                                           .depth = pos->depth,
-                                          .stop = &stop };
+                                          .stop = &stop,
+                                          .system_root = system_root };
 
             // make sure to clean buffer on every iteration
             memset(candidate_path, 0, DATA_PATH_LEN);
@@ -160,22 +175,30 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
                 goto skip_iterate;
             }
 
-            // grab magic on first folder, which is /data/app
-            if (!data_app_magic) {
-                if (file->f_inode->i_sb->s_magic) {
-                    data_app_magic = file->f_inode->i_sb->s_magic;
-                    pr_info("%s: dir: %s got magic! 0x%lx\n", __func__, pos->dirpath, data_app_magic);
-                } else {
+            // /data/app is one filesystem (the userdata mount) and the whole
+            // search stays inside it, so every directory must report the same
+            // s_magic or the tree is not what we think it is. A system app tree
+            // spans /system, /system_ext, /product and /vendor, which are
+            // separate mounts with different magic values, so the check only
+            // applies to the /data/app search.
+            if (!system_root) {
+                // grab magic on first folder, which is /data/app
+                if (!data_app_magic) {
+                    if (file->f_inode->i_sb->s_magic) {
+                        data_app_magic = file->f_inode->i_sb->s_magic;
+                        pr_info("%s: dir: %s got magic! 0x%lx\n", __func__, pos->dirpath, data_app_magic);
+                    } else {
+                        filp_close(file, NULL);
+                        goto skip_iterate;
+                    }
+                }
+
+                if (file->f_inode->i_sb->s_magic != data_app_magic) {
+                    pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath,
+                            file->f_inode->i_sb->s_magic, data_app_magic);
                     filp_close(file, NULL);
                     goto skip_iterate;
                 }
-            }
-
-            if (file->f_inode->i_sb->s_magic != data_app_magic) {
-                pr_info("%s: skip: %s magic: 0x%lx expected: 0x%lx\n", __func__, pos->dirpath,
-                        file->f_inode->i_sb->s_magic, data_app_magic);
-                filp_close(file, NULL);
-                goto skip_iterate;
             }
 
             iterate_dir(file, &ctx.ctx);
@@ -185,11 +208,14 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
             // we were calling is_manager_apk inside iterate_dir
             // now we defer file opens after iterate_dir
             // this way we dont open apks while inside that
-            if (!strstarts(candidate_path, "/data/ap"))
+            if (!system_root && !strstarts(candidate_path, "/data/ap"))
+                goto skip_iterate;
+
+            if (!candidate_path[0])
                 goto skip_iterate;
 
             bool is_manager = is_manager_apk(candidate_path);
-            pr_info("Found new base.apk at path: %s, is_manager: %d\n", candidate_path, is_manager);
+            pr_info("Found candidate apk at path: %s, is_manager: %d\n", candidate_path, is_manager);
 
             if (likely(!is_manager))
                 goto skip_iterate;
@@ -302,6 +328,32 @@ void track_throne(bool prune_only)
         }
         pr_info("Searching manager...\n");
         search_manager("/data/app", 2, &uid_list);
+
+        // A ROM may ship the manager preinstalled so that formatting /data
+        // cannot remove the only way to grant root. Such an APK lives in a
+        // system app tree, which the /data/app search above never looks at, so
+        // the manager would stay uncrowned after a wipe: the kernel then never
+        // installs the ksu fd for it, the app cannot read the kernel version
+        // and reports "unsupported" until it is installed as a data app.
+        //
+        // Each tree is one level deep (/system/app/<dir>/<pkg>.apk). The APK
+        // file name is the package name: get_pkg_from_apk_path() relies on that,
+        // because there is no "-<hash>" suffix to strip outside /data/app.
+        if (!ksu_is_manager_appid_valid()) {
+            static const char *const system_app_dirs[] = {
+                "/system/app",       "/system/priv-app",
+                "/system_ext/app",   "/system_ext/priv-app",
+                "/product/app",      "/product/priv-app",
+                "/vendor/app",
+            };
+            unsigned int i;
+
+            for (i = 0; i < ARRAY_SIZE(system_app_dirs); i++) {
+                if (ksu_is_manager_appid_valid())
+                    break;
+                search_manager_in(system_app_dirs[i], 1, true, &uid_list);
+            }
+        }
         pr_info("Search manager finished\n");
     }
 
